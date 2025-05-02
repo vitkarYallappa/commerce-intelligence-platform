@@ -1,0 +1,94 @@
+name: Deploy to Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      services:
+        description: 'Services to deploy (comma-separated list, or "all")'
+        required: true
+        default: 'all'
+        type: string
+
+jobs:
+  prepare:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.set-services.outputs.services }}
+      
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set services to deploy
+        id: set-services
+        run: |
+          if [ "${{ github.event.inputs.services }}" == "all" ]; then
+            echo "services=[\"api-gateway\", \"model-registry\", \"model-runner\", \"orchestration-service\", \"data-access\", \"monitoring-service\"]" >> $GITHUB_OUTPUT
+          else
+            # Convert comma-separated list to JSON array
+            SERVICES=$(echo "${{ github.event.inputs.services }}" | sed 's/ //g' | sed 's/,/", "/g' | sed 's/^/["/' | sed 's/$/"]/')
+            echo "services=$SERVICES" >> $GITHUB_OUTPUT
+          fi
+  
+  deploy:
+    name: Deploy Services
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.prepare.outputs.services) }}
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+      
+      - name: Set up Kustomize
+        uses: fluxcd/flux2/action@main
+        with:
+          cmd: kustomize version
+      
+      - name: Configure Kubernetes credentials
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets[format('KUBECONFIG_{0}', github.event.inputs.environment)] }}
+      
+      - name: Set image version in Kustomize
+        run: |
+          cd infrastructure/kubernetes/environments/${{ github.event.inputs.environment }}
+          kustomize edit set image ghcr.io/company/mcp-${{ matrix.service }}=ghcr.io/${{ github.repository_owner }}/mcp-${{ matrix.service }}:${{ github.sha }}
+      
+      - name: Deploy with Kustomize
+        run: |
+          cd infrastructure/kubernetes/environments/${{ github.event.inputs.environment }}
+          kustomize build . | kubectl apply -f -
+      
+      - name: Wait for deployment to complete
+        run: |
+          kubectl rollout status deployment/mcp-${{ matrix.service }} -n mcp --timeout=300s
+      
+      - name: Run post-deployment verification
+        run: |
+          chmod +x infrastructure/scripts/verify-deployment.sh
+          ./infrastructure/scripts/verify-deployment.sh ${{ matrix.service }} ${{ github.event.inputs.environment }}
+      
+      - name: Send deployment notification
+        uses: rtCamp/action-slack-notify@v2
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_MESSAGE: "Deployment of ${{ matrix.service }} to ${{ github.event.inputs.environment }} ${{ job.status }}"
+          SLACK_TITLE: "Deployment Status"

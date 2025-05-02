@@ -1,0 +1,75 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mcp
+
+resources:
+  - ../../base
+  - api-gateway.yaml
+  - model-registry.yaml
+  - model-runner.yaml
+  - orchestration-service.yaml
+  - data-access.yaml
+  - monitoring-service.yaml
+  - postgres.yaml
+  - redis.yaml
+  - kafka.yaml
+  - prometheus-grafana.yaml
+
+configMapGenerator:
+  - name: mcp-env-config
+    literals:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - ENABLE_PROFILING=true
+      - TRACING_ENABLED=true
+
+secretGenerator:
+  - name: mcp-db-credentials
+    literals:
+      - POSTGRES_USER=dev_user
+      - POSTGRES_PASSWORD=dev_password
+  - name: mcp-api-keys
+    literals:
+      - JWT_SECRET=dev_jwt_secret_do_not_use_in_production
+      - API_KEY=dev_api_key_do_not_use_in_production
+
+patches:
+  - path: resource-limits.yaml
+    target:
+      kind: Deployment
+  - path: probes.yaml
+    target:
+      kind: Deployment
+
+images:
+  - name: ghcr.io/company/mcp-api-gateway
+    newTag: latest
+  - name: ghcr.io/company/mcp-model-registry
+    newTag: latest
+  - name: ghcr.io/company/mcp-model-runner
+    newTag: latest
+  - name: ghcr.io/company/mcp-orchestration-service
+    newTag: latest
+  - name: ghcr.io/company/mcp-data-access
+    newTag: latest
+  - name: ghcr.io/company/mcp-monitoring-service
+    newTag: latest
+
+commonLabels:
+  environment: development
+  managed-by: kustomize
+
+replicas:
+  - name: mcp-api-gateway
+    count: 2
+  - name: mcp-model-registry
+    count: 1
+  - name: mcp-model-runner
+    count: 2
+  - name: mcp-orchestration-service
+    count: 2
+  - name: mcp-data-access
+    count: 2
+  - name: mcp-monitoring-service
+    count: 1

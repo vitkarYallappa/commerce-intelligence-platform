@@ -1,0 +1,280 @@
+version: '3.8'
+
+services:
+  #################################################
+  # Core MCP Services
+  #################################################
+  api-gateway:
+    build:
+      context: ../../
+      dockerfile: services/api-gateway/Dockerfile
+      target: development
+    volumes:
+      - ../../services/api-gateway:/app/services/api-gateway
+      - api_gateway_data:/app/data
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # Debug port
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mcp
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=dev_secret_change_in_production
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+      - model-registry
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  model-registry:
+    build:
+      context: ../../
+      dockerfile: services/model-registry/Dockerfile
+      target: development
+    volumes:
+      - ../../services/model-registry:/app/services/model-registry
+      - model_registry_data:/app/data
+    ports:
+      - "8002:8002"
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mcp
+      - STORAGE_PATH=/app/data/models
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+
+  model-runner:
+    build:
+      context: ../../
+      dockerfile: services/model-runner/Dockerfile
+      target: development
+    volumes:
+      - ../../services/model-runner:/app/services/model-runner
+      - model_runner_data:/app/data
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - MODEL_REGISTRY_URL=http://model-registry:8002
+      - REDIS_URL=redis://redis:6379/1
+      - ENVIRONMENT=development
+    depends_on:
+      - model-registry
+      - redis
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  orchestration-service:
+    build:
+      context: ../../
+      dockerfile: services/orchestration-service/Dockerfile
+      target: development
+    volumes:
+      - ../../services/orchestration-service:/app/services/orchestration-service
+      - orchestration_data:/app/data
+    ports:
+      - "8003:8003"
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - MODEL_REGISTRY_URL=http://model-registry:8002
+      - MODEL_RUNNER_URL=http://model-runner:8001
+      - REDIS_URL=redis://redis:6379/2
+      - ENVIRONMENT=development
+    depends_on:
+      - model-registry
+      - model-runner
+      - redis
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+
+  data-access:
+    build:
+      context: ../../
+      dockerfile: services/data-access/Dockerfile
+      target: development
+    volumes:
+      - ../../services/data-access:/app/services/data-access
+      - data_access_data:/app/data
+    ports:
+      - "8004:8004"
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mcp
+      - REDIS_URL=redis://redis:6379/3
+      - CUSTOMER_DATA_URL=mock://customer-data
+      - PRODUCT_CATALOG_URL=mock://product-catalog
+      - ORDER_SYSTEM_URL=mock://order-system
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload
+
+  monitoring-service:
+    build:
+      context: ../../
+      dockerfile: services/monitoring-service/Dockerfile
+      target: development
+    volumes:
+      - ../../services/monitoring-service:/app/services/monitoring-service
+      - monitoring_data:/app/data
+    ports:
+      - "8005:8005"
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mcp
+      - PROMETHEUS_URL=http://prometheus:9090
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - prometheus
+    networks:
+      - mcp-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+
+  #################################################
+  # Infrastructure Services
+  #################################################
+  postgres:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../infrastructure/docker/init-scripts:/docker-entrypoint-initdb.d
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=mcp
+    ports:
+      - "5432:5432"
+    networks:
+      - mcp-network
+
+  redis:
+    image: redis:7
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - mcp-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - mcp-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - mcp-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - mcp-network
+
+  #################################################
+  # Monitoring Stack
+  #################################################
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    volumes:
+      - ../../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    networks:
+      - mcp-network
+
+  grafana:
+    image: grafana/grafana:10.0.3
+    volumes:
+      - ../../monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ../../monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - mcp-network
+
+  #################################################
+  # Development Tools
+  #################################################
+  jupyter:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.dev
+      target: development
+    volumes:
+      - ../../:/app
+      - jupyter_data:/root/.jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - mcp-network
+    command: jupyter lab --ip=0.0.0.0 --port=8888

@@ -1,0 +1,99 @@
+# Multi-stage development Dockerfile for Commerce Intelligence Platform
+# This provides a consistent development environment for all developers
+
+#################################################
+# Base Python stage with common dependencies
+#################################################
+FROM python:3.10-slim AS python-base
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
+    PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    POETRY_VERSION=1.5.1 \
+    POETRY_HOME="/opt/poetry" \
+    POETRY_VIRTUALENVS_IN_PROJECT=true \
+    POETRY_NO_INTERACTION=1 \
+    PYSETUP_PATH="/opt/pysetup" \
+    VENV_PATH="/opt/pysetup/.venv"
+
+ENV PATH="$POETRY_HOME/bin:$VENV_PATH/bin:$PATH"
+
+# Install system dependencies
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry for dependency management
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+# Create a working directory
+WORKDIR /app
+
+#################################################
+# Development dependencies stage
+#################################################
+FROM python-base AS development-deps
+
+# Copy poetry configuration files
+COPY pyproject.toml poetry.lock* ./
+
+# Install dev dependencies
+RUN poetry install --no-root --with dev
+
+#################################################
+# Development stage with debugging tools
+#################################################
+FROM development-deps AS development
+
+# Install development and debugging tools
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    vim \
+    htop \
+    iputils-ping \
+    postgresql-client \
+    redis-tools \
+    kafkacat \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up container initialization
+COPY ./infrastructure/docker/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Install VS Code Python extension dependencies
+RUN pip install pylint black debugpy pytest
+
+# Create mount points
+RUN mkdir -p /app/services /app/data /app/logs /app/notebooks
+
+# Setup volume mounts for code and data
+VOLUME ["/app/services", "/app/data", "/app/logs", "/app/notebooks"]
+
+# Expose ports for development services and debugging
+# API Gateway
+EXPOSE 8000
+# Model Runner
+EXPOSE 8001
+# Model Registry
+EXPOSE 8002
+# Orchestration Service
+EXPOSE 8003
+# Data Access Layer
+EXPOSE 8004
+# Monitoring Service
+EXPOSE 8005
+# Jupyter Notebook
+EXPOSE 8888
+# Debug Port
+EXPOSE 5678
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["sleep", "infinity"]
